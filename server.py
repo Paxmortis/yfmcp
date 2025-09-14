@@ -33,6 +33,10 @@ class RecommendationType(str, Enum):
 # Initialize FastMCP server
 yfinance_server = FastMCP(
     "yfinance",
+    host="0.0.0.0",
+    port=8090,
+    sse_path="/sse",
+    message_path="/messages/",
     instructions="""
 # Yahoo Finance MCP Server
 
@@ -414,4 +418,9 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
 if __name__ == "__main__":
     # Initialize and run the server
     print("Starting Yahoo Finance MCP server...")
-    yfinance_server.run(transport="stdio")
+    # yfinance_server.run(transport="stdio")
+    yfinance_server.run(transport="sse")
+
+
+
+

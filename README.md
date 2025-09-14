@@ -112,6 +112,22 @@ uv run server.py
 
 This will start the server and allow you to test the available tools.
 
+### Expose via ngrok (SSE)
+
+The server is configured to run in SSE mode on `0.0.0.0:8090`, which works well with ngrok. To expose it publicly:
+
+1. Start the server:
+   ```bash
+   uv run server.py
+   ```
+
+2. In another terminal, start ngrok:
+   ```bash
+   ngrok http 8090
+   ```
+
+3. Use the generated HTTPS URL to connect to the MCP SSE endpoint from your client/tooling.
+
 ### Integration with Claude for Desktop
 
 To integrate this server with Claude for Desktop:
