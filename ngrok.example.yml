@@ -1,0 +1,8 @@
+version: "3"
+agent:
+  authtoken: "<YOUR_NGROK_AUTHTOKEN>"
+endpoints:
+  - name: mcp
+    url: https://<your-reserved-subdomain>.ngrok-free.app
+    upstream:
+      url: http://localhost:8090
