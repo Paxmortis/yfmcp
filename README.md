@@ -16,6 +16,12 @@ This is a Model Context Protocol (MCP) server that provides comprehensive financ
 
 ## MCP Tools
 
+> [!IMPORTANT]
+> The server starts in **connector-safe mode** so that only the `search` tool
+> (and the upcoming `fetch` tool) is registered for ChatGPT Team/Enterprise
+> connectors. Set `YFINANCE_CONNECTOR_SAFE_MODE=0` before starting the server
+> to enable the full research-oriented tools listed below.
+
 The server exposes the following tools through the Model Context Protocol:
 
 ### Stock Information
@@ -111,7 +117,9 @@ You can test the server with MCP Inspector by running:
 uv run server.py
 ```
 
-This will start the server and allow you to test the available tools.
+This starts the server in connector-safe mode. Set the environment variable
+`YFINANCE_CONNECTOR_SAFE_MODE=0` before launching if you want to exercise the
+full research toolset locally.
 
 ### Expose via ngrok (Streamable HTTP)
 
@@ -131,6 +139,31 @@ The server now runs using the MCP Streamable HTTP transport on `0.0.0.0:8090` at
 
 > [!TIP]
 > If you need the legacy SSE transport for an older client, set the environment variable `YFINANCE_MCP_TRANSPORT=sse` before starting the server. Otherwise, the Streamable HTTP transport is recommended and required for ChatGPT Team/Enterprise connectors.
+
+### Connector-safe mode (ChatGPT Teams)
+
+ChatGPT Team/Enterprise connectors should target the safe-mode endpoint at
+`/mcp`. The server prints `connector-safe` in the startup logs when this mode is
+active.
+
+- Start (or keep) safe mode explicitly when preparing a connector deployment:
+
+  ```bash
+  YFINANCE_CONNECTOR_SAFE_MODE=1 uv run server.py
+  ```
+
+  This registers only the discovery-focused tools (`search` today, with `fetch`
+  added automatically once released).
+
+- Switch to the full analyst workflow locally by disabling safe mode:
+
+  ```bash
+  YFINANCE_CONNECTOR_SAFE_MODE=0 uv run server.py
+  ```
+
+You can run a safe-mode instance for ChatGPT Teams while running a separate
+full-mode instance on another port for internal analysts by exporting
+`YFINANCE_CONNECTOR_SAFE_MODE=0` and adjusting the port/transport as needed.
 
 ### Integration with Claude for Desktop
 
