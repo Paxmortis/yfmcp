@@ -59,17 +59,37 @@ def _relaxed_check_accept_headers(self, request):
 
 StreamableHTTPServerTransport._check_accept_headers = _relaxed_check_accept_headers  # type: ignore[assignment]
 
-yfinance_server = FastMCP(
-    "yfinance",
-    host="0.0.0.0",
-    port=8090,
-    sse_path="/sse",
-    message_path="/messages/",
-    streamable_http_path="/mcp",
-    instructions="""
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+CONNECTOR_SAFE_MODE = _env_flag("YFINANCE_CONNECTOR_SAFE_MODE", True)
+
+if CONNECTOR_SAFE_MODE:
+    instructions_text = """
 # Yahoo Finance MCP Server
 
 This server is used to get information about a given ticker symbol from yahoo finance.
+
+Connector-safe mode is enabled. Only discovery-focused tools are registered for use with clients such as ChatGPT Team connectors.
+
+Available tools:
+- search: Search Yahoo Finance for ticker symbols and related news.
+
+(The upcoming `fetch` tool will be exposed automatically once available.)
+
+Set the environment variable `YFINANCE_CONNECTOR_SAFE_MODE=0` before starting the server to expose the full research toolset.
+"""
+else:
+    instructions_text = """
+# Yahoo Finance MCP Server
+
+This server is used to get information about a given ticker symbol from yahoo finance.
+
+Connector-safe mode is disabled. All research tools are registered.
 
 Available tools:
 - search: Search Yahoo Finance for ticker symbols and related news.
@@ -82,12 +102,39 @@ Available tools:
 - get_option_expiration_dates: Fetch the available options expiration dates for a given ticker symbol.
 - get_option_chain: Fetch the option chain for a given ticker symbol, expiration date, and option type.
 - get_recommendations: Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
-""",
+"""
+
+
+yfinance_server = FastMCP(
+    "yfinance",
+    host="0.0.0.0",
+    port=8090,
+    sse_path="/sse",
+    message_path="/messages/",
+    streamable_http_path="/mcp",
+    instructions=instructions_text,
 )
 
 
+def register_tool(*tool_args, safe_only: bool = False, **tool_kwargs):
+    """Conditionally register tools based on connector-safe mode.
+
+    Tools that should remain available to connector clients (e.g., search or
+    the upcoming fetch tool) should leave ``safe_only`` as ``False``. Tools
+    meant for the full research experience must set ``safe_only=True`` so they
+    are skipped when ``CONNECTOR_SAFE_MODE`` is enabled.
+    """
+
+    def decorator(func):
+        if CONNECTOR_SAFE_MODE and safe_only:
+            return func
+        return yfinance_server.tool(*tool_args, **tool_kwargs)(func)
+
+    return decorator
+
+
 # Search tool to satisfy ChatGPT search action requirement
-@yfinance_server.tool(
+@register_tool(
     name="search",
     description="""Search Yahoo Finance for companies, ticker symbols, and related news.
 
@@ -182,7 +229,7 @@ async def search(
     )
 
 
-@yfinance_server.tool(
+@register_tool(
     name="get_historical_stock_prices",
     description="""Get historical stock prices for a given ticker symbol from yahoo finance. Include the following information: Date, Open, High, Low, Close, Volume, Adj Close.
 Args:
@@ -198,6 +245,7 @@ Args:
         Default is "1d"
 """,
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    safe_only=True,
 )
 async def get_historical_stock_prices(
     ticker: str, period: str = "1mo", interval: str = "1d"
@@ -232,7 +280,7 @@ async def get_historical_stock_prices(
     return hist_data
 
 
-@yfinance_server.tool(
+@register_tool(
     name="get_stock_info",
     description="""Get stock information for a given ticker symbol from yahoo finance. Include the following information:
 Stock Price & Trading Info, Company Information, Financial Metrics, Earnings & Revenue, Margins & Returns, Dividends, Balance Sheet, Ownership, Analyst Coverage, Risk Metrics, Other.
@@ -242,6 +290,7 @@ Args:
         The ticker symbol of the stock to get information for, e.g. "AAPL"
 """,
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    safe_only=True,
 )
 async def get_stock_info(ticker: str) -> str:
     """Get stock information for a given ticker symbol"""
@@ -257,7 +306,7 @@ async def get_stock_info(ticker: str) -> str:
     return json.dumps(info)
 
 
-@yfinance_server.tool(
+@register_tool(
     name="get_yahoo_finance_news",
     description="""Get news for a given ticker symbol from yahoo finance.
 
@@ -266,6 +315,7 @@ Args:
         The ticker symbol of the stock to get news for, e.g. "AAPL"
 """,
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    safe_only=True,
 )
 async def get_yahoo_finance_news(ticker: str) -> str:
     """Get news for a given ticker symbol
@@ -306,7 +356,7 @@ async def get_yahoo_finance_news(ticker: str) -> str:
     return "\n\n".join(news_list)
 
 
-@yfinance_server.tool(
+@register_tool(
     name="get_stock_actions",
     description="""Get stock dividends and stock splits for a given ticker symbol from yahoo finance.
 
@@ -315,6 +365,7 @@ Args:
         The ticker symbol of the stock to get stock actions for, e.g. "AAPL"
 """,
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    safe_only=True,
 )
 async def get_stock_actions(ticker: str) -> str:
     """Get stock dividends and stock splits for a given ticker symbol"""
@@ -328,7 +379,7 @@ async def get_stock_actions(ticker: str) -> str:
     return actions_df.to_json(orient="records", date_format="iso")
 
 
-@yfinance_server.tool(
+@register_tool(
     name="get_financial_statement",
     description="""Get financial statement for a given ticker symbol from yahoo finance. You can choose from the following financial statement types: income_stmt, quarterly_income_stmt, balance_sheet, quarterly_balance_sheet, cashflow, quarterly_cashflow.
 
@@ -339,6 +390,7 @@ Args:
         The type of financial statement to get. You can choose from the following financial statement types: income_stmt, quarterly_income_stmt, balance_sheet, quarterly_balance_sheet, cashflow, quarterly_cashflow.
 """,
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    safe_only=True,
 )
 async def get_financial_statement(ticker: str, financial_type: str) -> str:
     """Get financial statement for a given ticker symbol"""
@@ -390,7 +442,7 @@ async def get_financial_statement(ticker: str, financial_type: str) -> str:
     return json.dumps(result)
 
 
-@yfinance_server.tool(
+@register_tool(
     name="get_holder_info",
     description="""Get holder information for a given ticker symbol from yahoo finance. You can choose from the following holder types: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.
 
@@ -401,6 +453,7 @@ Args:
         The type of holder information to get. You can choose from the following holder types: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.
 """,
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    safe_only=True,
 )
 async def get_holder_info(ticker: str, holder_type: str) -> str:
     """Get holder information for a given ticker symbol"""
@@ -430,7 +483,7 @@ async def get_holder_info(ticker: str, holder_type: str) -> str:
         return f"Error: invalid holder type {holder_type}. Please use one of the following: {HolderType.major_holders}, {HolderType.institutional_holders}, {HolderType.mutualfund_holders}, {HolderType.insider_transactions}, {HolderType.insider_purchases}, {HolderType.insider_roster_holders}."
 
 
-@yfinance_server.tool(
+@register_tool(
     name="get_option_expiration_dates",
     description="""Fetch the available options expiration dates for a given ticker symbol.
 
@@ -439,6 +492,7 @@ Args:
         The ticker symbol of the stock to get option expiration dates for, e.g. "AAPL"
 """,
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    safe_only=True,
 )
 async def get_option_expiration_dates(ticker: str) -> str:
     """Fetch the available options expiration dates for a given ticker symbol."""
@@ -454,7 +508,7 @@ async def get_option_expiration_dates(ticker: str) -> str:
     return json.dumps(company.options)
 
 
-@yfinance_server.tool(
+@register_tool(
     name="get_option_chain",
     description="""Fetch the option chain for a given ticker symbol, expiration date, and option type.
 
@@ -467,6 +521,7 @@ Args:
         The type of option to fetch ('calls' or 'puts')
 """,
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    safe_only=True,
 )
 async def get_option_chain(ticker: str, expiration_date: str, option_type: str) -> str:
     """Fetch the option chain for a given ticker symbol, expiration date, and option type.
@@ -507,7 +562,7 @@ async def get_option_chain(ticker: str, expiration_date: str, option_type: str) 
         return f"Error: invalid option type {option_type}. Please use one of the following: calls, puts."
 
 
-@yfinance_server.tool(
+@register_tool(
     name="get_recommendations",
     description="""Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
 
@@ -520,6 +575,7 @@ Args:
         The number of months back to get upgrades/downgrades for, default is 12.
 """,
     annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    safe_only=True,
 )
 async def get_recommendations(ticker: str, recommendation_type: str, months_back: int = 12) -> str:
     """Get recommendations or upgrades/downgrades for a given ticker symbol"""
@@ -559,5 +615,9 @@ if __name__ == "__main__":
             "Valid options are: stdio, sse, streamable-http."
         )
 
-    print(f"Starting Yahoo Finance MCP server using {transport} transport...")
+    mode_label = "connector-safe" if CONNECTOR_SAFE_MODE else "full"
+    print(
+        "Starting Yahoo Finance MCP server using "
+        f"{transport} transport in {mode_label} mode..."
+    )
     yfinance_server.run(transport=transport)
