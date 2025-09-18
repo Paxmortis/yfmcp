@@ -197,6 +197,7 @@ Args:
         Intraday data cannot extend last 60 days
         Default is "1d"
 """,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
 )
 async def get_historical_stock_prices(
     ticker: str, period: str = "1mo", interval: str = "1d"
@@ -240,6 +241,7 @@ Args:
     ticker: str
         The ticker symbol of the stock to get information for, e.g. "AAPL"
 """,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
 )
 async def get_stock_info(ticker: str) -> str:
     """Get stock information for a given ticker symbol"""
@@ -263,6 +265,7 @@ Args:
     ticker: str
         The ticker symbol of the stock to get news for, e.g. "AAPL"
 """,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
 )
 async def get_yahoo_finance_news(ticker: str) -> str:
     """Get news for a given ticker symbol
@@ -311,6 +314,7 @@ Args:
     ticker: str
         The ticker symbol of the stock to get stock actions for, e.g. "AAPL"
 """,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
 )
 async def get_stock_actions(ticker: str) -> str:
     """Get stock dividends and stock splits for a given ticker symbol"""
@@ -334,6 +338,7 @@ Args:
     financial_type: str
         The type of financial statement to get. You can choose from the following financial statement types: income_stmt, quarterly_income_stmt, balance_sheet, quarterly_balance_sheet, cashflow, quarterly_cashflow.
 """,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
 )
 async def get_financial_statement(ticker: str, financial_type: str) -> str:
     """Get financial statement for a given ticker symbol"""
@@ -395,6 +400,7 @@ Args:
     holder_type: str
         The type of holder information to get. You can choose from the following holder types: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.
 """,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
 )
 async def get_holder_info(ticker: str, holder_type: str) -> str:
     """Get holder information for a given ticker symbol"""
@@ -432,6 +438,7 @@ Args:
     ticker: str
         The ticker symbol of the stock to get option expiration dates for, e.g. "AAPL"
 """,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
 )
 async def get_option_expiration_dates(ticker: str) -> str:
     """Fetch the available options expiration dates for a given ticker symbol."""
@@ -459,6 +466,7 @@ Args:
     option_type: str
         The type of option to fetch ('calls' or 'puts')
 """,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
 )
 async def get_option_chain(ticker: str, expiration_date: str, option_type: str) -> str:
     """Fetch the option chain for a given ticker symbol, expiration date, and option type.
@@ -511,6 +519,7 @@ Args:
     months_back: int
         The number of months back to get upgrades/downgrades for, default is 12.
 """,
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
 )
 async def get_recommendations(ticker: str, recommendation_type: str, months_back: int = 12) -> str:
     """Get recommendations or upgrades/downgrades for a given ticker symbol"""
