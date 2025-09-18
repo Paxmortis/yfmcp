@@ -1,6 +1,8 @@
 import json
 import os
+from datetime import datetime, timezone
 from enum import Enum
+from typing import Annotated
 
 import pandas as pd
 import yfinance as yf
@@ -10,6 +12,8 @@ from mcp.server.streamable_http import (
     CONTENT_TYPE_SSE,
     StreamableHTTPServerTransport,
 )
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 
 # Define an enum for the type of financial statement
@@ -68,6 +72,7 @@ yfinance_server = FastMCP(
 This server is used to get information about a given ticker symbol from yahoo finance.
 
 Available tools:
+- search: Search Yahoo Finance for ticker symbols and related news.
 - get_historical_stock_prices: Get historical stock prices for a given ticker symbol from yahoo finance. Include the following information: Date, Open, High, Low, Close, Volume, Adj Close.
 - get_stock_info: Get stock information for a given ticker symbol from yahoo finance. Include the following information: Stock Price & Trading Info, Company Information, Financial Metrics, Earnings & Revenue, Margins & Returns, Dividends, Balance Sheet, Ownership, Analyst Coverage, Risk Metrics, Other.
 - get_yahoo_finance_news: Get news for a given ticker symbol from yahoo finance.
@@ -79,6 +84,102 @@ Available tools:
 - get_recommendations: Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
 """,
 )
+
+
+# Search tool to satisfy ChatGPT search action requirement
+@yfinance_server.tool(
+    name="search",
+    description="""Search Yahoo Finance for companies, ticker symbols, and related news.
+
+Args:
+    query: str
+        Free-form text describing the company, ticker, or topic to search for.
+    quote_count: int
+        Maximum number of ticker matches to return (default 5).
+    news_count: int
+        Maximum number of news articles to include (default 5).
+""",
+    annotations=ToolAnnotations(
+        title="Search Yahoo Finance",
+        readOnlyHint=True,
+        openWorldHint=True,
+    ),
+)
+async def search(
+    query: Annotated[str, Field(min_length=1, description="Ticker symbol, company name, or topic to search for.")],
+    quote_count: Annotated[int, Field(ge=1, le=25, description="Maximum number of ticker matches to include.")] = 5,
+    news_count: Annotated[int, Field(ge=0, le=25, description="Maximum number of news articles to include.")] = 5,
+) -> str:
+    """Search Yahoo Finance for tickers and related news."""
+
+    try:
+        search_client = yf.Search(query, max_results=quote_count, news_count=news_count)
+    except Exception as error:  # pragma: no cover - remote service errors
+        return json.dumps({"query": query, "error": f"Error performing search: {error}"})
+
+    def _convert_timestamp(value: int | None) -> str | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromtimestamp(int(value), tz=timezone.utc).isoformat()
+        except (TypeError, ValueError):
+            return None
+
+    results: list[dict[str, object]] = []
+    quotes: list[dict[str, object]] = []
+    for quote in search_client.quotes[:quote_count]:
+        entry = {
+            "type": quote.get("quoteType"),
+            "symbol": quote.get("symbol"),
+            "name": quote.get("shortname") or quote.get("longname"),
+            "exchange": quote.get("exchDisp"),
+            "score": quote.get("score"),
+            "exchangeDelay": quote.get("exchangeDelay"),
+            "currency": quote.get("currency"),
+            "url": f"https://finance.yahoo.com/quote/{quote.get('symbol')}" if quote.get("symbol") else None,
+        }
+        quotes.append(entry)
+        results.append(
+            {
+                "type": "quote",
+                "title": entry.get("name") or entry.get("symbol"),
+                "url": entry.get("url"),
+                "snippet": f"Symbol {entry.get('symbol')} on {entry.get('exchange')} ({entry.get('currency') or 'currency N/A'})",
+                "score": entry.get("score"),
+                "symbol": entry.get("symbol"),
+            }
+        )
+
+    news: list[dict[str, object]] = []
+    for article in search_client.news[:news_count]:
+        entry = {
+            "type": "news",
+            "title": article.get("title"),
+            "publisher": article.get("publisher"),
+            "summary": article.get("summary"),
+            "url": article.get("link"),
+            "publishedAt": _convert_timestamp(article.get("providerPublishTime")),
+        }
+        news.append(entry)
+        results.append(
+            {
+                "type": "news",
+                "title": entry.get("title"),
+                "url": entry.get("url"),
+                "snippet": entry.get("summary"),
+                "publisher": entry.get("publisher"),
+                "publishedAt": entry.get("publishedAt"),
+            }
+        )
+
+    return json.dumps(
+        {
+            "query": query,
+            "results": results,
+            "quotes": quotes,
+            "news": news,
+        }
+    )
 
 
 @yfinance_server.tool(
@@ -451,5 +552,3 @@ if __name__ == "__main__":
 
     print(f"Starting Yahoo Finance MCP server using {transport} transport...")
     yfinance_server.run(transport=transport)
-
-
