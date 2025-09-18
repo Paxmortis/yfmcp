@@ -16,37 +16,28 @@ This is a Model Context Protocol (MCP) server that provides comprehensive financ
 
 ## MCP Tools
 
-The server exposes the following tools through the Model Context Protocol:
-
-### Stock Information
-
-| Tool | Description |
-|------|-------------|
-| `search` | Search Yahoo Finance for ticker symbols and related news |
-| `get_historical_stock_prices` | Get historical OHLCV data for a stock with customizable period and interval |
-| `get_stock_info` | Get comprehensive stock data including price, metrics, and company details |
-| `get_yahoo_finance_news` | Get latest news articles for a stock |
-| `get_stock_actions` | Get stock dividends and splits history |
-
-### Financial Statements
+To comply with the ChatGPT connector restrictions documented in `restrictions.md`,
+the server now exposes only the required `search` and `fetch` tools. Everything
+that previously lived behind individual endpoints is bundled into the metadata
+returned by `fetch`.
 
 | Tool | Description |
 |------|-------------|
-| `get_financial_statement` | Get income statement, balance sheet, or cash flow statement (annual/quarterly) |
-| `get_holder_info` | Get major holders, institutional holders, mutual funds, or insider transactions |
+| `search` | Search Yahoo Finance for ticker symbols or company names and return results whose IDs follow the `ticker:<SYMBOL>:summary` pattern. |
+| `fetch` | Retrieve the resource identified by a search result. The response contains a natural-language summary plus structured metadata covering price history, financial statements, holders, corporate actions, news headlines, and analyst recommendations. |
 
-### Options Data
+`fetch` responses expose a `metadata` object with the following sections so that
+agents can reproduce the functionality of the legacy tools:
 
-| Tool | Description |
-|------|-------------|
-| `get_option_expiration_dates` | Get available options expiration dates |
-| `get_option_chain` | Get options chain for a specific expiration date and type (calls/puts) |
-
-### Analyst Information
-
-| Tool | Description |
-|------|-------------|
-| `get_recommendations` | Get analyst recommendations or upgrades/downgrades history |
+- `info`: The raw Yahoo Finance company information dictionary.
+- `history`: Recent OHLCV price history (default one month of daily bars).
+- `financialStatements`: Annual and quarterly income statement, balance sheet,
+  and cash flow statement data.
+- `holders`: Major, institutional, mutual fund, and insider ownership data.
+- `actions`: Dividend and split history.
+- `news`: Latest Yahoo Finance headlines for the symbol.
+- `recommendations`: Analyst recommendation history plus filtered upgrades and
+  downgrades from the last twelve months.
 
 ## Real-World Use Cases
 

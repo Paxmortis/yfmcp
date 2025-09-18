@@ -14,36 +14,23 @@
 
 ## MCP 工具
 
-服务器通过模型上下文协议提供以下工具：
-
-### 股票信息
-
-| 工具 | 描述 |
-|------|-------------|
-| `get_historical_stock_prices` | 获取股票的历史 OHLCV 数据，可自定义时间段和间隔 |
-| `get_stock_info` | 获取全面的股票数据，包括价格、指标和公司详情 |
-| `get_yahoo_finance_news` | 获取股票的最新新闻文章 |
-| `get_stock_actions` | 获取股票分红和拆股历史 |
-
-### 财务报表
+为了遵守 `restrictions.md` 中记录的 ChatGPT 连接器规范，服务器现在只暴露必需的
+`search` 和 `fetch` 两个工具，其余功能通过 `fetch` 返回的 `metadata` 提供。
 
 | 工具 | 描述 |
 |------|-------------|
-| `get_financial_statement` | 获取利润表、资产负债表或现金流量表（年度/季度） |
-| `get_holder_info` | 获取主要股东、机构股东、共同基金或内幕交易信息 |
+| `search` | 在 Yahoo Finance 中搜索股票代码或公司名称，返回 `ticker:<股票代码>:summary` 形式的 ID。 |
+| `fetch` | 根据搜索结果的 ID 获取详细数据，包含自然语言摘要和结构化元数据（价格历史、财务报表、持有人、公司行动、新闻以及分析师推荐等）。 |
 
-### 期权数据
+`fetch` 返回的 `metadata` 包含以下部分，用于覆盖旧工具的功能：
 
-| 工具 | 描述 |
-|------|-------------|
-| `get_option_expiration_dates` | 获取可用的期权到期日期 |
-| `get_option_chain` | 获取特定到期日期和类型（看涨/看跌）的期权链 |
-
-### 分析师信息
-
-| 工具 | 描述 |
-|------|-------------|
-| `get_recommendations` | 获取分析师推荐或评级变更历史 |
+- `info`: Yahoo Finance 的原始公司信息字典。
+- `history`: 最近一个月的日线 OHLCV 价格历史。
+- `financialStatements`: 年度与季度的利润表、资产负债表和现金流量表。
+- `holders`: 主要、机构、共同基金和内幕持有人数据。
+- `actions`: 分红与拆股历史。
+- `news`: 该股票的最新 Yahoo Finance 新闻。
+- `recommendations`: 分析师推荐历史以及最近 12 个月的评级上调和下调。
 
 ## 实际应用场景
 
