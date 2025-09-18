@@ -112,9 +112,9 @@ uv run server.py
 
 This will start the server and allow you to test the available tools.
 
-### Expose via ngrok (SSE)
+### Expose via ngrok (Streamable HTTP)
 
-The server is configured to run in SSE mode on `0.0.0.0:8090`, which works well with ngrok. To expose it publicly:
+The server now runs using the MCP Streamable HTTP transport on `0.0.0.0:8090` at the `/mcp` endpoint. This works well with ngrok. To expose it publicly:
 
 1. Start the server:
    ```bash
@@ -126,7 +126,10 @@ The server is configured to run in SSE mode on `0.0.0.0:8090`, which works well 
    ngrok http 8090
    ```
 
-3. Use the generated HTTPS URL to connect to the MCP SSE endpoint from your client/tooling.
+3. Use the generated HTTPS URL **with the `/mcp` path appended** (for example, `https://<your-ngrok-id>.ngrok-free.app/mcp`) when configuring your MCP client.
+
+> [!TIP]
+> If you need the legacy SSE transport for an older client, set the environment variable `YFINANCE_MCP_TRANSPORT=sse` before starting the server. Otherwise, the Streamable HTTP transport is recommended and required for ChatGPT Team/Enterprise connectors.
 
 ### Integration with Claude for Desktop
 
@@ -178,5 +181,4 @@ To integrate this server with Claude for Desktop:
 ## License
 
 MIT
-
 

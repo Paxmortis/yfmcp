@@ -1,4 +1,5 @@
 import json
+import os
 from enum import Enum
 
 import pandas as pd
@@ -37,6 +38,7 @@ yfinance_server = FastMCP(
     port=8090,
     sse_path="/sse",
     message_path="/messages/",
+    streamable_http_path="/mcp",
     instructions="""
 # Yahoo Finance MCP Server
 
@@ -417,10 +419,15 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
 
 if __name__ == "__main__":
     # Initialize and run the server
-    print("Starting Yahoo Finance MCP server...")
-    # yfinance_server.run(transport="stdio")
-    yfinance_server.run(transport="sse")
+    transport = os.getenv("YFINANCE_MCP_TRANSPORT", "streamable-http")
+    if transport not in {"stdio", "sse", "streamable-http"}:
+        raise ValueError(
+            "Unsupported transport set via YFINANCE_MCP_TRANSPORT. "
+            "Valid options are: stdio, sse, streamable-http."
+        )
 
+    print(f"Starting Yahoo Finance MCP server using {transport} transport...")
+    yfinance_server.run(transport=transport)
 
 
 
