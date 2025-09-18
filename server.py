@@ -1,8 +1,10 @@
+import base64
 import json
 import os
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated
+from typing import Annotated, Any
+from urllib.parse import parse_qs
 
 import pandas as pd
 import yfinance as yf
@@ -16,7 +18,6 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 
-# Define an enum for the type of financial statement
 class FinancialType(str, Enum):
     income_stmt = "income_stmt"
     quarterly_income_stmt = "quarterly_income_stmt"
@@ -40,19 +41,24 @@ class RecommendationType(str, Enum):
     upgrades_downgrades = "upgrades_downgrades"
 
 
-# Initialize FastMCP server
-# Relax Accept header requirements for Streamable HTTP to support clients that
-# send only wildcard or partial Accept values (e.g. ChatGPT Team connectors).
+# Relax Accept header requirements for Streamable HTTP to support clients with
+# limited Accept values (e.g. ChatGPT Team connectors).
 def _relaxed_check_accept_headers(self, request):
     accept_header = request.headers.get("accept")
     if not accept_header:
         return True, True
 
-    accept_types = [media_type.strip() for media_type in accept_header.split(",") if media_type.strip()]
+    accept_types = [
+        media_type.strip() for media_type in accept_header.split(",") if media_type.strip()
+    ]
     wildcard = any(media_type in {"*/*"} for media_type in accept_types)
 
-    has_json = any(media_type.startswith(CONTENT_TYPE_JSON) for media_type in accept_types) or wildcard
-    has_sse = any(media_type.startswith(CONTENT_TYPE_SSE) for media_type in accept_types) or wildcard
+    has_json = (
+        any(media_type.startswith(CONTENT_TYPE_JSON) for media_type in accept_types) or wildcard
+    )
+    has_sse = (
+        any(media_type.startswith(CONTENT_TYPE_SSE) for media_type in accept_types) or wildcard
+    )
 
     return has_json, has_sse
 
@@ -66,27 +72,226 @@ yfinance_server = FastMCP(
     sse_path="/sse",
     message_path="/messages/",
     streamable_http_path="/mcp",
-    instructions="""
-# Yahoo Finance MCP Server
+    instructions="""# Yahoo Finance MCP Server
 
-This server is used to get information about a given ticker symbol from yahoo finance.
+This server exposes two tools that comply with the ChatGPT connector requirements.
 
-Available tools:
-- search: Search Yahoo Finance for ticker symbols and related news.
-- get_historical_stock_prices: Get historical stock prices for a given ticker symbol from yahoo finance. Include the following information: Date, Open, High, Low, Close, Volume, Adj Close.
-- get_stock_info: Get stock information for a given ticker symbol from yahoo finance. Include the following information: Stock Price & Trading Info, Company Information, Financial Metrics, Earnings & Revenue, Margins & Returns, Dividends, Balance Sheet, Ownership, Analyst Coverage, Risk Metrics, Other.
-- get_yahoo_finance_news: Get news for a given ticker symbol from yahoo finance.
-- get_stock_actions: Get stock dividends and stock splits for a given ticker symbol from yahoo finance.
-- get_financial_statement: Get financial statement for a given ticker symbol from yahoo finance. You can choose from the following financial statement types: income_stmt, quarterly_income_stmt, balance_sheet, quarterly_balance_sheet, cashflow, quarterly_cashflow.
-- get_holder_info: Get holder information for a given ticker symbol from yahoo finance. You can choose from the following holder types: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.
-- get_option_expiration_dates: Fetch the available options expiration dates for a given ticker symbol.
-- get_option_chain: Fetch the option chain for a given ticker symbol, expiration date, and option type.
-- get_recommendations: Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
+## Tools
+
+- **search(query)** – Search Yahoo Finance for ticker symbols and related headlines. Results include identifiers that can be used with the `fetch` tool.
+- **fetch(id)** – Retrieve structured Yahoo Finance data for the supplied identifier. Supported identifiers include:
+  - `quote:<symbol>`
+  - `history:<symbol>[?period=<period>&interval=<interval>]`
+  - `financials:<symbol>:<financial_statement>`
+  - `holders:<symbol>:<holder_type>`
+  - `options:<symbol>:expirations`
+  - `options:<symbol>:chain:<expiration>[?type=calls|puts]`
+  - `recommendations:<symbol>:recommendations`
+  - `recommendations:<symbol>:upgrades_downgrades[?months=<int>]`
+  - `news:<encoded-payload>` (returned directly from `search` results)
+
+### Financial statement types
+- income_stmt
+- quarterly_income_stmt
+- balance_sheet
+- quarterly_balance_sheet
+- cashflow
+- quarterly_cashflow
+
+### Holder types
+- major_holders
+- institutional_holders
+- mutualfund_holders
+- insider_transactions
+- insider_purchases
+- insider_roster_holders
+
+### Recommendation types
+- recommendations
+- upgrades_downgrades
 """,
 )
 
+DEFAULT_QUOTE_RESULTS = 5
+DEFAULT_NEWS_RESULTS = 5
 
-# Search tool to satisfy ChatGPT search action requirement
+FINANCIAL_URL_SUFFIX = {
+    FinancialType.income_stmt: "financials",
+    FinancialType.quarterly_income_stmt: "financials",
+    FinancialType.balance_sheet: "balance-sheet",
+    FinancialType.quarterly_balance_sheet: "balance-sheet",
+    FinancialType.cashflow: "cash-flow",
+    FinancialType.quarterly_cashflow: "cash-flow",
+}
+
+QUOTE_INFO_KEYS = [
+    "regularMarketPrice",
+    "regularMarketChange",
+    "regularMarketChangePercent",
+    "regularMarketDayHigh",
+    "regularMarketDayLow",
+    "regularMarketPreviousClose",
+    "regularMarketOpen",
+    "regularMarketVolume",
+    "currency",
+    "fiftyTwoWeekHigh",
+    "fiftyTwoWeekLow",
+    "fiftyTwoWeekRange",
+    "marketCap",
+    "trailingPE",
+    "forwardPE",
+    "dividendYield",
+    "beta",
+]
+
+COMPANY_INFO_KEYS = [
+    "shortName",
+    "longName",
+    "longBusinessSummary",
+    "sector",
+    "industry",
+    "website",
+    "country",
+    "city",
+    "address1",
+    "phone",
+    "fullTimeEmployees",
+]
+
+
+def _convert_timestamp(value: int | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _clean_value(value: Any) -> Any:
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return value.isoformat()
+    if isinstance(value, (pd.Timedelta, pd.DateOffset)):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _clean_value(sub_value) for key, sub_value in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_clean_value(item) for item in value]
+    if hasattr(value, "tolist"):
+        try:
+            return value.tolist()
+        except Exception:  # pragma: no cover - fallback conversion
+            pass
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:  # pragma: no cover - fallback conversion
+            pass
+    return value
+
+
+def _serialize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {key: _clean_value(value) for key, value in metadata.items()}
+
+
+def _encode_payload(payload: dict[str, Any]) -> str:
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, default=str).encode("utf-8"))
+    return encoded.decode("utf-8").rstrip("=")
+
+
+def _decode_payload(encoded: str) -> dict[str, Any]:
+    padding = "=" * (-len(encoded) % 4)
+    data = base64.urlsafe_b64decode(f"{encoded}{padding}".encode("utf-8"))
+    return json.loads(data.decode("utf-8"))
+
+
+def _build_fetch_response(
+    item_id: str,
+    title: str,
+    url: str | None,
+    metadata: dict[str, Any],
+    *,
+    text: str | None = None,
+) -> str:
+    metadata_ready = _serialize_metadata(metadata)
+    payload = {
+        "id": item_id,
+        "title": title,
+        "url": url,
+        "text": text if text is not None else json.dumps(metadata_ready, indent=2),
+        "metadata": metadata_ready,
+    }
+    return json.dumps(payload)
+
+
+def _error_response(item_id: str, message: str) -> str:
+    return _build_fetch_response(
+        item_id,
+        "Error",
+        None,
+        {"error": message},
+        text=message,
+    )
+
+
+def _load_ticker(symbol: str) -> tuple[yf.Ticker | None, str | None]:
+    try:
+        ticker = yf.Ticker(symbol)
+    except Exception as error:  # pragma: no cover - remote service errors
+        return None, f"Error retrieving ticker {symbol}: {error}"
+
+    try:
+        if ticker.isin is None:
+            return None, f"Company ticker {symbol} not found."
+    except Exception as error:  # pragma: no cover - remote service errors
+        return None, f"Error verifying ticker {symbol}: {error}"
+
+    return ticker, None
+
+
+def _quote_available_fetch_ids(symbol: str) -> list[str]:
+    base = symbol.strip()
+    return [
+        f"quote:{base}",
+        f"history:{base}?period=1mo&interval=1d",
+        f"history:{base}?period=1y&interval=1wk",
+        f"financials:{base}:{FinancialType.income_stmt.value}",
+        f"financials:{base}:{FinancialType.quarterly_income_stmt.value}",
+        f"financials:{base}:{FinancialType.balance_sheet.value}",
+        f"financials:{base}:{FinancialType.quarterly_balance_sheet.value}",
+        f"financials:{base}:{FinancialType.cashflow.value}",
+        f"financials:{base}:{FinancialType.quarterly_cashflow.value}",
+        f"holders:{base}:{HolderType.major_holders.value}",
+        f"holders:{base}:{HolderType.institutional_holders.value}",
+        f"holders:{base}:{HolderType.mutualfund_holders.value}",
+        f"holders:{base}:{HolderType.insider_transactions.value}",
+        f"holders:{base}:{HolderType.insider_purchases.value}",
+        f"holders:{base}:{HolderType.insider_roster_holders.value}",
+        f"recommendations:{base}:{RecommendationType.recommendations.value}",
+        f"recommendations:{base}:{RecommendationType.upgrades_downgrades.value}?months=12",
+        f"options:{base}:expirations",
+    ]
+
+
+def _dataframe_to_records(
+    data: pd.DataFrame | None,
+    *,
+    index_name: str | None = None,
+    reset_index: bool = True,
+) -> list[dict[str, Any]]:
+    if data is None or data.empty:
+        return []
+
+    frame = data
+    if reset_index:
+        if index_name is not None:
+            frame = frame.reset_index(names=index_name)
+        else:
+            frame = frame.reset_index()
+
+    return json.loads(frame.to_json(orient="records", date_format="iso"))
+
+
 @yfinance_server.tool(
     name="search",
     description="""Search Yahoo Finance for companies, ticker symbols, and related news.
@@ -94,10 +299,6 @@ Available tools:
 Args:
     query: str
         Free-form text describing the company, ticker, or topic to search for.
-    quote_count: int
-        Maximum number of ticker matches to return (default 5).
-    news_count: int
-        Maximum number of news articles to include (default 5).
 """,
     annotations=ToolAnnotations(
         title="Search Yahoo Finance",
@@ -106,452 +307,603 @@ Args:
     ),
 )
 async def search(
-    query: Annotated[str, Field(min_length=1, description="Ticker symbol, company name, or topic to search for.")],
-    quote_count: Annotated[int, Field(ge=1, le=25, description="Maximum number of ticker matches to include.")] = 5,
-    news_count: Annotated[int, Field(ge=0, le=25, description="Maximum number of news articles to include.")] = 5,
+    query: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="Ticker symbol, company name, or topic to search for.",
+        ),
+    ],
 ) -> str:
     """Search Yahoo Finance for tickers and related news."""
 
+    trimmed_query = query.strip()
+    if not trimmed_query:
+        return json.dumps({"query": query, "results": [], "error": "Empty query provided."})
+
     try:
-        search_client = yf.Search(query, max_results=quote_count, news_count=news_count)
+        search_client = yf.Search(
+            trimmed_query, max_results=DEFAULT_QUOTE_RESULTS, news_count=DEFAULT_NEWS_RESULTS
+        )
     except Exception as error:  # pragma: no cover - remote service errors
-        return json.dumps({"query": query, "error": f"Error performing search: {error}"})
+        return json.dumps(
+            {
+                "query": trimmed_query,
+                "results": [],
+                "error": f"Error performing search: {error}",
+            }
+        )
 
-    def _convert_timestamp(value: int | None) -> str | None:
-        if not value:
-            return None
-        try:
-            return datetime.fromtimestamp(int(value), tz=timezone.utc).isoformat()
-        except (TypeError, ValueError):
-            return None
-
-    results: list[dict[str, object]] = []
-    quotes: list[dict[str, object]] = []
-    for quote in search_client.quotes[:quote_count]:
-        entry = {
-            "type": quote.get("quoteType"),
-            "symbol": quote.get("symbol"),
-            "name": quote.get("shortname") or quote.get("longname"),
-            "exchange": quote.get("exchDisp"),
-            "score": quote.get("score"),
-            "exchangeDelay": quote.get("exchangeDelay"),
-            "currency": quote.get("currency"),
-            "url": f"https://finance.yahoo.com/quote/{quote.get('symbol')}" if quote.get("symbol") else None,
-        }
-        quotes.append(entry)
-        results.append(
+    results: list[dict[str, Any]] = []
+    quotes = list(search_client.quotes or [])
+    for quote in quotes[:DEFAULT_QUOTE_RESULTS]:
+        symbol = quote.get("symbol")
+        if not symbol:
+            continue
+        name = quote.get("shortname") or quote.get("longname") or symbol
+        exchange = quote.get("exchDisp")
+        currency = quote.get("currency")
+        snippet_parts = [f"Symbol: {symbol}"]
+        if exchange:
+            snippet_parts.append(f"Exchange: {exchange}")
+        if currency:
+            snippet_parts.append(f"Currency: {currency}")
+        metadata = _serialize_metadata(
             {
                 "type": "quote",
-                "title": entry.get("name") or entry.get("symbol"),
-                "url": entry.get("url"),
-                "snippet": f"Symbol {entry.get('symbol')} on {entry.get('exchange')} ({entry.get('currency') or 'currency N/A'})",
-                "score": entry.get("score"),
-                "symbol": entry.get("symbol"),
+                "symbol": symbol,
+                "name": name,
+                "exchange": exchange,
+                "currency": currency,
+                "score": quote.get("score"),
+                "availableFetchIds": _quote_available_fetch_ids(symbol),
             }
         )
-
-    news: list[dict[str, object]] = []
-    for article in search_client.news[:news_count]:
-        entry = {
-            "type": "news",
-            "title": article.get("title"),
-            "publisher": article.get("publisher"),
-            "summary": article.get("summary"),
-            "url": article.get("link"),
-            "publishedAt": _convert_timestamp(article.get("providerPublishTime")),
-        }
-        news.append(entry)
         results.append(
             {
-                "type": "news",
-                "title": entry.get("title"),
-                "url": entry.get("url"),
-                "snippet": entry.get("summary"),
-                "publisher": entry.get("publisher"),
-                "publishedAt": entry.get("publishedAt"),
+                "id": f"quote:{symbol}",
+                "title": name,
+                "url": f"https://finance.yahoo.com/quote/{symbol}",
+                "snippet": " | ".join(snippet_parts),
+                "metadata": metadata,
             }
         )
 
-    return json.dumps(
-        {
-            "query": query,
-            "results": results,
-            "quotes": quotes,
-            "news": news,
+    news_items = list(search_client.news or [])
+    for article in news_items[:DEFAULT_NEWS_RESULTS]:
+        title = article.get("title")
+        url = article.get("link")
+        if not title or not url:
+            continue
+        summary = article.get("summary")
+        publisher = article.get("publisher")
+        published_at = _convert_timestamp(article.get("providerPublishTime"))
+        payload = {
+            "type": "news",
+            "title": title,
+            "summary": summary,
+            "publisher": publisher,
+            "url": url,
+            "publishedAt": published_at,
+            "relatedTickers": article.get("relatedTickers"),
         }
+        encoded_id = _encode_payload(payload)
+        snippet = summary or (publisher or url)
+        results.append(
+            {
+                "id": f"news:{encoded_id}",
+                "title": title,
+                "url": url,
+                "snippet": snippet,
+                "metadata": _serialize_metadata(payload),
+            }
+        )
+
+    return json.dumps({"query": trimmed_query, "results": results})
+
+
+@yfinance_server.tool(
+    name="fetch",
+    description="""Retrieve structured Yahoo Finance data for an identifier returned by `search`.
+
+Args:
+    id: str
+        Identifier value from a previous `search` response or one of the documented helper identifiers.
+""",
+    annotations=ToolAnnotations(
+        title="Fetch Yahoo Finance item", readOnlyHint=True, openWorldHint=True
+    ),
+)
+async def fetch(
+    item_id: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="Identifier returned by the search tool (e.g. quote:AAPL).",
+        ),
+    ],
+) -> str:
+    normalized_id = item_id.strip()
+    if not normalized_id:
+        return _error_response(item_id, "Empty identifier provided.")
+
+    prefix, sep, remainder = normalized_id.partition(":")
+    if not sep or not remainder:
+        return _error_response(normalized_id, "Identifier must be of the form '<type>:<value>'.")
+
+    key = prefix.lower()
+    if key == "quote":
+        return _fetch_quote(normalized_id, remainder)
+    if key == "history":
+        return _fetch_history(normalized_id, remainder)
+    if key == "financials":
+        return _fetch_financials(normalized_id, remainder)
+    if key == "holders":
+        return _fetch_holders(normalized_id, remainder)
+    if key == "options":
+        return _fetch_options(normalized_id, remainder)
+    if key == "recommendations":
+        return _fetch_recommendations(normalized_id, remainder)
+    if key == "news":
+        return _fetch_news(normalized_id, remainder)
+
+    return _error_response(normalized_id, f"Unsupported identifier prefix '{prefix}'.")
+
+
+def _fetch_quote(item_id: str, remainder: str) -> str:
+    symbol = remainder.strip()
+    if not symbol:
+        return _error_response(item_id, "Missing symbol in quote identifier.")
+
+    ticker, error = _load_ticker(symbol)
+    if error:
+        return _error_response(item_id, error)
+    assert ticker is not None
+
+    try:
+        info = ticker.get_info()
+    except Exception:  # pragma: no cover - remote service errors
+        info = {}
+
+    history_records: list[dict[str, Any]] = []
+    try:
+        history_records = _dataframe_to_records(
+            ticker.history(period="1mo", interval="1d"),
+            index_name="Date",
+        )
+    except Exception:  # pragma: no cover - remote service errors
+        history_records = []
+
+    long_name = info.get("longName") or info.get("shortName") or symbol.upper()
+    exchange = info.get("fullExchangeName") or info.get("exchange")
+    currency = info.get("currency")
+    price = info.get("regularMarketPrice")
+    change = info.get("regularMarketChange")
+    change_percent = info.get("regularMarketChangePercent")
+    summary_lines = [f"{long_name} ({symbol.upper()})"]
+    if exchange:
+        summary_lines.append(f"Exchange: {exchange}")
+    if price is not None:
+        summary_lines.append(f"Price: {price}{f' {currency}' if currency else ''}")
+    if change is not None and change_percent is not None:
+        summary_lines.append(f"Change: {change} ({change_percent}%)")
+    elif change is not None:
+        summary_lines.append(f"Change: {change}")
+    elif change_percent is not None:
+        summary_lines.append(f"Change: {change_percent}%")
+    range_52 = info.get("fiftyTwoWeekRange")
+    if range_52:
+        summary_lines.append(f"52-week range: {range_52}")
+    summary_lines.append(f"Fetched at {datetime.now(timezone.utc).isoformat()}")
+
+    metadata = {
+        "symbol": symbol.upper(),
+        "quote": {key: info.get(key) for key in QUOTE_INFO_KEYS if key in info},
+        "company": {key: info.get(key) for key in COMPANY_INFO_KEYS if key in info},
+        "history": history_records,
+        "availableFetchIds": _quote_available_fetch_ids(symbol),
+    }
+
+    return _build_fetch_response(
+        item_id,
+        f"{long_name} overview",
+        f"https://finance.yahoo.com/quote/{symbol}",
+        metadata,
+        text="\n".join(summary_lines),
     )
 
 
-@yfinance_server.tool(
-    name="get_historical_stock_prices",
-    description="""Get historical stock prices for a given ticker symbol from yahoo finance. Include the following information: Date, Open, High, Low, Close, Volume, Adj Close.
-Args:
-    ticker: str
-        The ticker symbol of the stock to get historical prices for, e.g. "AAPL"
-    period : str
-        Valid periods: 1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max
-        Either Use period parameter or use start and end
-        Default is "1mo"
-    interval : str
-        Valid intervals: 1m,2m,5m,15m,30m,60m,90m,1h,1d,5d,1wk,1mo,3mo
-        Intraday data cannot extend last 60 days
-        Default is "1d"
-""",
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
-)
-async def get_historical_stock_prices(
-    ticker: str, period: str = "1mo", interval: str = "1d"
-) -> str:
-    """Get historical stock prices for a given ticker symbol
+def _fetch_history(item_id: str, remainder: str) -> str:
+    symbol, _, query = remainder.partition("?")
+    symbol = symbol.strip()
+    if not symbol:
+        return _error_response(item_id, "Missing symbol in history identifier.")
 
-    Args:
-        ticker: str
-            The ticker symbol of the stock to get historical prices for, e.g. "AAPL"
-        period : str
-            Valid periods: 1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max
-            Either Use period parameter or use start and end
-            Default is "1mo"
-        interval : str
-            Valid intervals: 1m,2m,5m,15m,30m,60m,90m,1h,1d,5d,1wk,1mo,3mo
-            Intraday data cannot extend last 60 days
-            Default is "1d"
-    """
-    company = yf.Ticker(ticker)
+    params = parse_qs(query)
+    period = params.get("period", ["1mo"])[0]
+    interval = params.get("interval", ["1d"])[0]
+
+    ticker, error = _load_ticker(symbol)
+    if error:
+        return _error_response(item_id, error)
+    assert ticker is not None
+
     try:
-        if company.isin is None:
-            print(f"Company ticker {ticker} not found.")
-            return f"Company ticker {ticker} not found."
-    except Exception as e:
-        print(f"Error: getting historical stock prices for {ticker}: {e}")
-        return f"Error: getting historical stock prices for {ticker}: {e}"
+        history_df = ticker.history(period=period, interval=interval)
+    except Exception as error:  # pragma: no cover - remote service errors
+        return _error_response(item_id, f"Error retrieving historical data: {error}")
 
-    # If the company is found, get the historical data
-    hist_data = company.history(period=period, interval=interval)
-    hist_data = hist_data.reset_index(names="Date")
-    hist_data = hist_data.to_json(orient="records", date_format="iso")
-    return hist_data
+    records = _dataframe_to_records(history_df, index_name="Date")
+    if not records:
+        metadata = {
+            "ticker": symbol.upper(),
+            "period": period,
+            "interval": interval,
+            "prices": [],
+        }
+        return _build_fetch_response(
+            item_id,
+            f"{symbol.upper()} historical prices",
+            f"https://finance.yahoo.com/quote/{symbol}/history",
+            metadata,
+            text=(
+                f"No historical data available for {symbol.upper()} with period {period} and interval {interval}."
+            ),
+        )
+
+    latest = records[-1]
+    close_value = latest.get("Close")
+    summary_lines = [
+        f"{symbol.upper()} historical prices ({period}, {interval})",
+        f"Most recent close on {latest.get('Date')}: {close_value}",
+        f"Records returned: {len(records)}",
+    ]
+    metadata = {
+        "ticker": symbol.upper(),
+        "period": period,
+        "interval": interval,
+        "prices": records,
+    }
+    return _build_fetch_response(
+        item_id,
+        f"{symbol.upper()} historical prices",
+        f"https://finance.yahoo.com/quote/{symbol}/history",
+        metadata,
+        text="\n".join(summary_lines),
+    )
 
 
-@yfinance_server.tool(
-    name="get_stock_info",
-    description="""Get stock information for a given ticker symbol from yahoo finance. Include the following information:
-Stock Price & Trading Info, Company Information, Financial Metrics, Earnings & Revenue, Margins & Returns, Dividends, Balance Sheet, Ownership, Analyst Coverage, Risk Metrics, Other.
+def _fetch_financials(item_id: str, remainder: str) -> str:
+    symbol, _, fin_type_raw = remainder.partition(":")
+    symbol = symbol.strip()
+    fin_type_raw = fin_type_raw.strip()
+    if not symbol or not fin_type_raw:
+        return _error_response(
+            item_id, "Financial statement identifier must include symbol and type."
+        )
 
-Args:
-    ticker: str
-        The ticker symbol of the stock to get information for, e.g. "AAPL"
-""",
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
-)
-async def get_stock_info(ticker: str) -> str:
-    """Get stock information for a given ticker symbol"""
-    company = yf.Ticker(ticker)
     try:
-        if company.isin is None:
-            print(f"Company ticker {ticker} not found.")
-            return f"Company ticker {ticker} not found."
-    except Exception as e:
-        print(f"Error: getting stock information for {ticker}: {e}")
-        return f"Error: getting stock information for {ticker}: {e}"
-    info = company.info
-    return json.dumps(info)
+        fin_type = FinancialType(fin_type_raw)
+    except ValueError:
+        return _error_response(item_id, f"Invalid financial statement type '{fin_type_raw}'.")
 
+    ticker, error = _load_ticker(symbol)
+    if error:
+        return _error_response(item_id, error)
+    assert ticker is not None
 
-@yfinance_server.tool(
-    name="get_yahoo_finance_news",
-    description="""Get news for a given ticker symbol from yahoo finance.
-
-Args:
-    ticker: str
-        The ticker symbol of the stock to get news for, e.g. "AAPL"
-""",
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
-)
-async def get_yahoo_finance_news(ticker: str) -> str:
-    """Get news for a given ticker symbol
-
-    Args:
-        ticker: str
-            The ticker symbol of the stock to get news for, e.g. "AAPL"
-    """
-    company = yf.Ticker(ticker)
     try:
-        if company.isin is None:
-            print(f"Company ticker {ticker} not found.")
-            return f"Company ticker {ticker} not found."
-    except Exception as e:
-        print(f"Error: getting news for {ticker}: {e}")
-        return f"Error: getting news for {ticker}: {e}"
+        statement = getattr(ticker, fin_type.value)
+    except Exception as error:  # pragma: no cover - remote service errors
+        return _error_response(item_id, f"Error retrieving financial statement: {error}")
 
-    # If the company is found, get the news
-    try:
-        news = company.news
-    except Exception as e:
-        print(f"Error: getting news for {ticker}: {e}")
-        return f"Error: getting news for {ticker}: {e}"
+    if statement is None or statement.empty:
+        return _build_fetch_response(
+            item_id,
+            f"{symbol.upper()} {fin_type.value}",
+            f"https://finance.yahoo.com/quote/{symbol}/{FINANCIAL_URL_SUFFIX[fin_type]}",
+            {
+                "ticker": symbol.upper(),
+                "financialType": fin_type.value,
+                "statement": [],
+            },
+            text=f"No {fin_type.value} data available for {symbol.upper()}.",
+        )
 
-    news_list = []
-    for news in company.news:
-        if news.get("content", {}).get("contentType", "") == "STORY":
-            title = news.get("content", {}).get("title", "")
-            summary = news.get("content", {}).get("summary", "")
-            description = news.get("content", {}).get("description", "")
-            url = news.get("content", {}).get("canonicalUrl", {}).get("url", "")
-            news_list.append(
-                f"Title: {title}\nSummary: {summary}\nDescription: {description}\nURL: {url}"
-            )
-    if not news_list:
-        print(f"No news found for company that searched with {ticker} ticker.")
-        return f"No news found for company that searched with {ticker} ticker."
-    return "\n\n".join(news_list)
-
-
-@yfinance_server.tool(
-    name="get_stock_actions",
-    description="""Get stock dividends and stock splits for a given ticker symbol from yahoo finance.
-
-Args:
-    ticker: str
-        The ticker symbol of the stock to get stock actions for, e.g. "AAPL"
-""",
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
-)
-async def get_stock_actions(ticker: str) -> str:
-    """Get stock dividends and stock splits for a given ticker symbol"""
-    try:
-        company = yf.Ticker(ticker)
-    except Exception as e:
-        print(f"Error: getting stock actions for {ticker}: {e}")
-        return f"Error: getting stock actions for {ticker}: {e}"
-    actions_df = company.actions
-    actions_df = actions_df.reset_index(names="Date")
-    return actions_df.to_json(orient="records", date_format="iso")
-
-
-@yfinance_server.tool(
-    name="get_financial_statement",
-    description="""Get financial statement for a given ticker symbol from yahoo finance. You can choose from the following financial statement types: income_stmt, quarterly_income_stmt, balance_sheet, quarterly_balance_sheet, cashflow, quarterly_cashflow.
-
-Args:
-    ticker: str
-        The ticker symbol of the stock to get financial statement for, e.g. "AAPL"
-    financial_type: str
-        The type of financial statement to get. You can choose from the following financial statement types: income_stmt, quarterly_income_stmt, balance_sheet, quarterly_balance_sheet, cashflow, quarterly_cashflow.
-""",
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
-)
-async def get_financial_statement(ticker: str, financial_type: str) -> str:
-    """Get financial statement for a given ticker symbol"""
-
-    company = yf.Ticker(ticker)
-    try:
-        if company.isin is None:
-            print(f"Company ticker {ticker} not found.")
-            return f"Company ticker {ticker} not found."
-    except Exception as e:
-        print(f"Error: getting financial statement for {ticker}: {e}")
-        return f"Error: getting financial statement for {ticker}: {e}"
-
-    if financial_type == FinancialType.income_stmt:
-        financial_statement = company.income_stmt
-    elif financial_type == FinancialType.quarterly_income_stmt:
-        financial_statement = company.quarterly_income_stmt
-    elif financial_type == FinancialType.balance_sheet:
-        financial_statement = company.balance_sheet
-    elif financial_type == FinancialType.quarterly_balance_sheet:
-        financial_statement = company.quarterly_balance_sheet
-    elif financial_type == FinancialType.cashflow:
-        financial_statement = company.cashflow
-    elif financial_type == FinancialType.quarterly_cashflow:
-        financial_statement = company.quarterly_cashflow
-    else:
-        return f"Error: invalid financial type {financial_type}. Please use one of the following: {FinancialType.income_stmt}, {FinancialType.quarterly_income_stmt}, {FinancialType.balance_sheet}, {FinancialType.quarterly_balance_sheet}, {FinancialType.cashflow}, {FinancialType.quarterly_cashflow}."
-
-    # Create a list to store all the json objects
-    result = []
-
-    # Loop through each column (date)
-    for column in financial_statement.columns:
+    records: list[dict[str, Any]] = []
+    for column in statement.columns:
         if isinstance(column, pd.Timestamp):
-            date_str = column.strftime("%Y-%m-%d")  # Format as YYYY-MM-DD
+            date_str = column.strftime("%Y-%m-%d")
         else:
             date_str = str(column)
+        column_series = statement[column]
+        entry = {"date": date_str}
+        for metric, value in column_series.items():
+            entry[str(metric)] = None if pd.isna(value) else _clean_value(value)
+        records.append(entry)
 
-        # Create a dictionary for each date
-        date_obj = {"date": date_str}
+    metadata = {
+        "ticker": symbol.upper(),
+        "financialType": fin_type.value,
+        "statement": records,
+    }
 
-        # Add each metric as a key-value pair
-        for index, value in financial_statement[column].items():
-            # Add the value, handling NaN values
-            date_obj[index] = None if pd.isna(value) else value
+    return _build_fetch_response(
+        item_id,
+        f"{symbol.upper()} {fin_type.value}",
+        f"https://finance.yahoo.com/quote/{symbol}/{FINANCIAL_URL_SUFFIX[fin_type]}",
+        metadata,
+        text=f"{symbol.upper()} {fin_type.value.replace('_', ' ')} covering {len(records)} periods.",
+    )
 
-        result.append(date_obj)
 
-    return json.dumps(result)
+def _fetch_holders(item_id: str, remainder: str) -> str:
+    symbol, _, holder_raw = remainder.partition(":")
+    symbol = symbol.strip()
+    holder_raw = holder_raw.strip()
+    if not symbol or not holder_raw:
+        return _error_response(item_id, "Holder identifier must include symbol and holder type.")
 
-
-@yfinance_server.tool(
-    name="get_holder_info",
-    description="""Get holder information for a given ticker symbol from yahoo finance. You can choose from the following holder types: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.
-
-Args:
-    ticker: str
-        The ticker symbol of the stock to get holder information for, e.g. "AAPL"
-    holder_type: str
-        The type of holder information to get. You can choose from the following holder types: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.
-""",
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
-)
-async def get_holder_info(ticker: str, holder_type: str) -> str:
-    """Get holder information for a given ticker symbol"""
-
-    company = yf.Ticker(ticker)
     try:
-        if company.isin is None:
-            print(f"Company ticker {ticker} not found.")
-            return f"Company ticker {ticker} not found."
-    except Exception as e:
-        print(f"Error: getting holder info for {ticker}: {e}")
-        return f"Error: getting holder info for {ticker}: {e}"
+        holder_type = HolderType(holder_raw)
+    except ValueError:
+        return _error_response(item_id, f"Invalid holder type '{holder_raw}'.")
 
-    if holder_type == HolderType.major_holders:
-        return company.major_holders.reset_index(names="metric").to_json(orient="records")
-    elif holder_type == HolderType.institutional_holders:
-        return company.institutional_holders.to_json(orient="records")
-    elif holder_type == HolderType.mutualfund_holders:
-        return company.mutualfund_holders.to_json(orient="records", date_format="iso")
-    elif holder_type == HolderType.insider_transactions:
-        return company.insider_transactions.to_json(orient="records", date_format="iso")
-    elif holder_type == HolderType.insider_purchases:
-        return company.insider_purchases.to_json(orient="records", date_format="iso")
-    elif holder_type == HolderType.insider_roster_holders:
-        return company.insider_roster_holders.to_json(orient="records", date_format="iso")
+    ticker, error = _load_ticker(symbol)
+    if error:
+        return _error_response(item_id, error)
+    assert ticker is not None
+
+    try:
+        if holder_type == HolderType.major_holders:
+            holder_df = ticker.major_holders
+            if holder_df is not None:
+                holder_df = holder_df.reset_index(names="metric").rename(columns={0: "value"})
+        else:
+            holder_df = getattr(ticker, holder_type.value)
+            if holder_df is not None:
+                holder_df = holder_df.reset_index(drop=True)
+    except Exception as error:  # pragma: no cover - remote service errors
+        return _error_response(item_id, f"Error retrieving holder data: {error}")
+
+    records = _dataframe_to_records(holder_df, reset_index=False) if holder_df is not None else []
+    metadata = {
+        "ticker": symbol.upper(),
+        "holderType": holder_type.value,
+        "records": records,
+    }
+
+    if not records:
+        text = f"No {holder_type.value.replace('_', ' ')} data available for {symbol.upper()}."
     else:
-        return f"Error: invalid holder type {holder_type}. Please use one of the following: {HolderType.major_holders}, {HolderType.institutional_holders}, {HolderType.mutualfund_holders}, {HolderType.insider_transactions}, {HolderType.insider_purchases}, {HolderType.insider_roster_holders}."
+        text = f"{symbol.upper()} {holder_type.value.replace('_', ' ')} records returned: {len(records)}."
+
+    return _build_fetch_response(
+        item_id,
+        f"{symbol.upper()} {holder_type.value}",
+        f"https://finance.yahoo.com/quote/{symbol}/holders",
+        metadata,
+        text=text,
+    )
 
 
-@yfinance_server.tool(
-    name="get_option_expiration_dates",
-    description="""Fetch the available options expiration dates for a given ticker symbol.
+def _fetch_options(item_id: str, remainder: str) -> str:
+    symbol, _, rest = remainder.partition(":")
+    symbol = symbol.strip()
+    rest = rest.strip()
+    if not symbol:
+        return _error_response(item_id, "Options identifier must include a symbol.")
 
-Args:
-    ticker: str
-        The ticker symbol of the stock to get option expiration dates for, e.g. "AAPL"
-""",
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
-)
-async def get_option_expiration_dates(ticker: str) -> str:
-    """Fetch the available options expiration dates for a given ticker symbol."""
+    ticker, error = _load_ticker(symbol)
+    if error:
+        return _error_response(item_id, error)
+    assert ticker is not None
 
-    company = yf.Ticker(ticker)
+    if not rest or rest == "expirations":
+        try:
+            expirations = list(getattr(ticker, "options", []))
+        except Exception as error:  # pragma: no cover - remote service errors
+            return _error_response(item_id, f"Error retrieving option expirations: {error}")
+        metadata = {
+            "ticker": symbol.upper(),
+            "expirationDates": expirations,
+        }
+        if not expirations:
+            text = f"No option expirations available for {symbol.upper()}."
+        else:
+            text = f"{symbol.upper()} has {len(expirations)} option expiration dates. Next expiration: {expirations[0]}"
+        return _build_fetch_response(
+            item_id,
+            f"{symbol.upper()} option expirations",
+            f"https://finance.yahoo.com/quote/{symbol}/options",
+            metadata,
+            text=text,
+        )
+
+    if not rest.startswith("chain"):
+        return _error_response(item_id, f"Unsupported options identifier segment '{rest}'.")
+
+    _, _, chain_segment = rest.partition(":")
+    expiration, _, query = chain_segment.partition("?")
+    expiration = expiration.strip()
+    if not expiration:
+        return _error_response(item_id, "Missing expiration date for option chain identifier.")
+
+    params = parse_qs(query)
+    option_type = params.get("type", ["calls"])[0].lower()
+    if option_type not in {"calls", "puts"}:
+        return _error_response(item_id, "Option chain type must be 'calls' or 'puts'.")
+
+    available_expirations = list(getattr(ticker, "options", []))
+    if expiration not in available_expirations:
+        return _error_response(
+            item_id, f"No options available for {symbol.upper()} on {expiration}."
+        )
+
     try:
-        if company.isin is None:
-            print(f"Company ticker {ticker} not found.")
-            return f"Company ticker {ticker} not found."
-    except Exception as e:
-        print(f"Error: getting option expiration dates for {ticker}: {e}")
-        return f"Error: getting option expiration dates for {ticker}: {e}"
-    return json.dumps(company.options)
+        chain = ticker.option_chain(expiration)
+    except Exception as error:  # pragma: no cover - remote service errors
+        return _error_response(item_id, f"Error retrieving option chain: {error}")
 
+    chain_df = getattr(chain, option_type, None)
+    contracts = _dataframe_to_records(chain_df, reset_index=False) if chain_df is not None else []
+    metadata = {
+        "ticker": symbol.upper(),
+        "expiration": expiration,
+        "optionType": option_type,
+        "contracts": contracts,
+    }
 
-@yfinance_server.tool(
-    name="get_option_chain",
-    description="""Fetch the option chain for a given ticker symbol, expiration date, and option type.
-
-Args:
-    ticker: str
-        The ticker symbol of the stock to get option chain for, e.g. "AAPL"
-    expiration_date: str
-        The expiration date for the options chain (format: 'YYYY-MM-DD')
-    option_type: str
-        The type of option to fetch ('calls' or 'puts')
-""",
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
-)
-async def get_option_chain(ticker: str, expiration_date: str, option_type: str) -> str:
-    """Fetch the option chain for a given ticker symbol, expiration date, and option type.
-
-    Args:
-        ticker: The ticker symbol of the stock
-        expiration_date: The expiration date for the options chain (format: 'YYYY-MM-DD')
-        option_type: The type of option to fetch ('calls' or 'puts')
-
-    Returns:
-        str: JSON string containing the option chain data
-    """
-
-    company = yf.Ticker(ticker)
-    try:
-        if company.isin is None:
-            print(f"Company ticker {ticker} not found.")
-            return f"Company ticker {ticker} not found."
-    except Exception as e:
-        print(f"Error: getting option chain for {ticker}: {e}")
-        return f"Error: getting option chain for {ticker}: {e}"
-
-    # Check if the expiration date is valid
-    if expiration_date not in company.options:
-        return f"Error: No options available for the date {expiration_date}. You can use `get_option_expiration_dates` to get the available expiration dates."
-
-    # Check if the option type is valid
-    if option_type not in ["calls", "puts"]:
-        return "Error: Invalid option type. Please use 'calls' or 'puts'."
-
-    # Get the option chain
-    option_chain = company.option_chain(expiration_date)
-    if option_type == "calls":
-        return option_chain.calls.to_json(orient="records", date_format="iso")
-    elif option_type == "puts":
-        return option_chain.puts.to_json(orient="records", date_format="iso")
+    if not contracts:
+        text = f"No {option_type} option contracts for {symbol.upper()} expiring on {expiration}."
     else:
-        return f"Error: invalid option type {option_type}. Please use one of the following: calls, puts."
+        text = f"{symbol.upper()} {option_type} options for {expiration}. Contracts returned: {len(contracts)}."
+
+    return _build_fetch_response(
+        item_id,
+        f"{symbol.upper()} {option_type} options ({expiration})",
+        f"https://finance.yahoo.com/quote/{symbol}/options?date={expiration}",
+        metadata,
+        text=text,
+    )
 
 
-@yfinance_server.tool(
-    name="get_recommendations",
-    description="""Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
+def _fetch_recommendations(item_id: str, remainder: str) -> str:
+    symbol, _, rest = remainder.partition(":")
+    symbol = symbol.strip()
+    rest = rest.strip()
+    if not symbol or not rest:
+        return _error_response(item_id, "Recommendation identifier must include symbol and type.")
 
-Args:
-    ticker: str
-        The ticker symbol of the stock to get recommendations for, e.g. "AAPL"
-    recommendation_type: str
-        The type of recommendation to get. You can choose from the following recommendation types: recommendations, upgrades_downgrades.
-    months_back: int
-        The number of months back to get upgrades/downgrades for, default is 12.
-""",
-    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
-)
-async def get_recommendations(ticker: str, recommendation_type: str, months_back: int = 12) -> str:
-    """Get recommendations or upgrades/downgrades for a given ticker symbol"""
-    company = yf.Ticker(ticker)
+    rec_type_raw, _, query = rest.partition("?")
+    rec_type_raw = rec_type_raw.strip()
     try:
-        if company.isin is None:
-            print(f"Company ticker {ticker} not found.")
-            return f"Company ticker {ticker} not found."
-    except Exception as e:
-        print(f"Error: getting recommendations for {ticker}: {e}")
-        return f"Error: getting recommendations for {ticker}: {e}"
+        rec_type = RecommendationType(rec_type_raw)
+    except ValueError:
+        return _error_response(item_id, f"Invalid recommendation type '{rec_type_raw}'.")
+
+    params = parse_qs(query)
+    months_value = params.get("months", ["12"])[0]
     try:
-        if recommendation_type == RecommendationType.recommendations:
-            return company.recommendations.to_json(orient="records")
-        elif recommendation_type == RecommendationType.upgrades_downgrades:
-            # Get the upgrades/downgrades based on the cutoff date
-            upgrades_downgrades = company.upgrades_downgrades.reset_index()
-            cutoff_date = pd.Timestamp.now() - pd.DateOffset(months=months_back)
-            upgrades_downgrades = upgrades_downgrades[
-                upgrades_downgrades["GradeDate"] >= cutoff_date
-            ]
-            upgrades_downgrades = upgrades_downgrades.sort_values("GradeDate", ascending=False)
-            # Get the first occurrence (most recent) for each firm
-            latest_by_firm = upgrades_downgrades.drop_duplicates(subset=["Firm"])
-            return latest_by_firm.to_json(orient="records", date_format="iso")
-    except Exception as e:
-        print(f"Error: getting recommendations for {ticker}: {e}")
-        return f"Error: getting recommendations for {ticker}: {e}"
+        months_back = max(1, int(months_value))
+    except (TypeError, ValueError):
+        return _error_response(item_id, f"Invalid months parameter '{months_value}'.")
+
+    ticker, error = _load_ticker(symbol)
+    if error:
+        return _error_response(item_id, error)
+    assert ticker is not None
+
+    if rec_type == RecommendationType.recommendations:
+        try:
+            recommendations_df = ticker.recommendations
+        except Exception as error:  # pragma: no cover - remote service errors
+            return _error_response(item_id, f"Error retrieving recommendations: {error}")
+
+        records = _dataframe_to_records(recommendations_df, index_name="Date")
+        metadata = {
+            "ticker": symbol.upper(),
+            "recommendationType": rec_type.value,
+            "entries": records,
+        }
+        if not records:
+            text = f"No analyst recommendations available for {symbol.upper()}."
+        else:
+            text = f"{symbol.upper()} analyst recommendations retrieved: {len(records)}."
+        return _build_fetch_response(
+            item_id,
+            f"{symbol.upper()} recommendations",
+            f"https://finance.yahoo.com/quote/{symbol}/analysis",
+            metadata,
+            text=text,
+        )
+
+    try:
+        upgrades_df = ticker.upgrades_downgrades.reset_index()
+    except Exception as error:  # pragma: no cover - remote service errors
+        return _error_response(item_id, f"Error retrieving upgrades/downgrades: {error}")
+
+    if upgrades_df is None or upgrades_df.empty:
+        metadata = {
+            "ticker": symbol.upper(),
+            "recommendationType": rec_type.value,
+            "entries": [],
+        }
+        return _build_fetch_response(
+            item_id,
+            f"{symbol.upper()} upgrades/downgrades",
+            f"https://finance.yahoo.com/quote/{symbol}/analysis",
+            metadata,
+            text=f"No upgrades/downgrades available for {symbol.upper()}.",
+        )
+
+    cutoff = pd.Timestamp.now() - pd.DateOffset(months=months_back)
+    filtered = upgrades_df[upgrades_df["GradeDate"] >= cutoff]
+    filtered = filtered.sort_values("GradeDate", ascending=False)
+    latest_by_firm = filtered.drop_duplicates(subset=["Firm"])
+    records = _dataframe_to_records(latest_by_firm, reset_index=False)
+    metadata = {
+        "ticker": symbol.upper(),
+        "recommendationType": rec_type.value,
+        "monthsBack": months_back,
+        "entries": records,
+    }
+    if not records:
+        text = f"No upgrades/downgrades for {symbol.upper()} in the past {months_back} months."
+    else:
+        text = f"{symbol.upper()} upgrades/downgrades in the last {months_back} months: {len(records)} unique firms."
+    return _build_fetch_response(
+        item_id,
+        f"{symbol.upper()} upgrades/downgrades",
+        f"https://finance.yahoo.com/quote/{symbol}/analysis",
+        metadata,
+        text=text,
+    )
+
+
+def _fetch_news(item_id: str, remainder: str) -> str:
+    encoded = remainder.strip()
+    if not encoded:
+        return _error_response(item_id, "Missing payload in news identifier.")
+
+    try:
+        payload = _decode_payload(encoded)
+    except Exception as error:
+        return _error_response(item_id, f"Invalid news identifier payload: {error}")
+
+    title = payload.get("title") or "News article"
+    summary = payload.get("summary") or "No summary available."
+    publisher = payload.get("publisher")
+    published_at = payload.get("publishedAt")
+    url = payload.get("url")
+
+    summary_lines = [title]
+    if publisher:
+        summary_lines.append(f"Publisher: {publisher}")
+    if published_at:
+        summary_lines.append(f"Published: {published_at}")
+    summary_lines.append("")
+    summary_lines.append(summary)
+
+    metadata = {
+        "title": title,
+        "summary": summary,
+        "publisher": publisher,
+        "publishedAt": published_at,
+        "url": url,
+        "relatedTickers": payload.get("relatedTickers"),
+    }
+
+    return _build_fetch_response(
+        item_id,
+        title,
+        url,
+        metadata,
+        text="\n".join(line for line in summary_lines if line is not None),
+    )
 
 
 if __name__ == "__main__":
-    # Initialize and run the server
     transport = os.getenv("YFINANCE_MCP_TRANSPORT", "streamable-http")
     if transport not in {"stdio", "sse", "streamable-http"}:
         raise ValueError(
