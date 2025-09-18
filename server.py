@@ -5,6 +5,11 @@ from enum import Enum
 import pandas as pd
 import yfinance as yf
 from mcp.server.fastmcp import FastMCP
+from mcp.server.streamable_http import (
+    CONTENT_TYPE_JSON,
+    CONTENT_TYPE_SSE,
+    StreamableHTTPServerTransport,
+)
 
 
 # Define an enum for the type of financial statement
@@ -32,6 +37,24 @@ class RecommendationType(str, Enum):
 
 
 # Initialize FastMCP server
+# Relax Accept header requirements for Streamable HTTP to support clients that
+# send only wildcard or partial Accept values (e.g. ChatGPT Team connectors).
+def _relaxed_check_accept_headers(self, request):
+    accept_header = request.headers.get("accept")
+    if not accept_header:
+        return True, True
+
+    accept_types = [media_type.strip() for media_type in accept_header.split(",") if media_type.strip()]
+    wildcard = any(media_type in {"*/*"} for media_type in accept_types)
+
+    has_json = any(media_type.startswith(CONTENT_TYPE_JSON) for media_type in accept_types) or wildcard
+    has_sse = any(media_type.startswith(CONTENT_TYPE_SSE) for media_type in accept_types) or wildcard
+
+    return has_json, has_sse
+
+
+StreamableHTTPServerTransport._check_accept_headers = _relaxed_check_accept_headers  # type: ignore[assignment]
+
 yfinance_server = FastMCP(
     "yfinance",
     host="0.0.0.0",
@@ -428,6 +451,5 @@ if __name__ == "__main__":
 
     print(f"Starting Yahoo Finance MCP server using {transport} transport...")
     yfinance_server.run(transport=transport)
-
 
 
